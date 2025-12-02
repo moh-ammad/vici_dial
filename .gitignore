@@ -1,0 +1,39 @@
+# Environment files
+**/*.env
+
+# Node modules
+**/node_modules/
+
+# Vicidial directories or files
+**/vicidial/
+
+# JSON data files
+/all_lists.json
+/formatted_campaigns.json
+/raw_campaigns.json
+/version_test.txt
+/version.json
+/vicidial_campaigns_formatted.json
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Editor-specific
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.cache

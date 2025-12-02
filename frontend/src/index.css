@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+/* Basic base styles for the app. Keep a small set of safe defaults for
+   typography and accessible rendering. */
+:root {
+  --app-bg: #f8fafc; /* light gray (Tailwind gray-50) */
+  --app-text: #0f172a; /* dark slate text */
+  --ui-muted: rgba(15,23,42,0.6);
+  --font-stack: system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: var(--font-stack);
+  line-height: 1.5;
+  font-weight: 400;
+  background-color: var(--app-bg);
+  color: var(--app-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Small helpers so unstyled elements still look acceptable */
+a { color: inherit; text-decoration: none }
+button { font-family: inherit }
+
+/* end base */
+
+
