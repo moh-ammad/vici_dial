@@ -1,6 +1,7 @@
 import { callVicidial } from "../services/vicidial.service.js";
 import { fixDateFormat } from "../utils/date.js";
 import { parsePipeData } from "../utils/formatter.js";
+import { syncAgentsCampaignsToDb, getAgentCampaignsPaginated, getAgentsWithCampaigns } from "../services/prisma.service.js";
 
 import fs from "fs";
 import path from "path";
@@ -534,12 +535,23 @@ export const syncAllAgentsCampaigns = async (req, res) => {
 
         console.log(`✓ Synced campaigns for ${processed}/${agents.length} agents. Total campaigns: ${totalCampaigns}`);
 
+        // Sync to database
+        console.log('📦 Syncing to database...');
+        const dbSync = await syncAgentsCampaignsToDb(results);
+        
+        if (dbSync.success) {
+            console.log(`✅ Database sync complete:`, dbSync.stats);
+        } else {
+            console.error('❌ Database sync failed:', dbSync.error);
+        }
+
         return res.json({
             success: true,
             data: {
                 agents_processed: processed,
                 total_agents: agents.length,
                 total_campaigns: totalCampaigns,
+                db_sync: dbSync,
                 results
             }
         });
@@ -584,6 +596,46 @@ export const getAgentsCampaignCounts = async (req, res) => {
         return res.json({ success: true, data: map, source: 'individual_files' });
     } catch (err) {
         console.error('ERROR in getAgentsCampaignCounts:', err);
+        return res.status(500).json({ success: false, error: err.toString() });
+    }
+};
+
+// Return paginated agents (with campaigns) from DB
+export const getAgentsPaginated = async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const perPage = parseInt(req.query.perPage) || 8;
+        const search = req.query.search || '';
+
+        const result = await getAgentsWithCampaigns({ page, perPage, search });
+
+        return res.json({ success: true, data: result });
+    } catch (err) {
+        console.error('ERROR in getAgentsPaginated:', err);
+        return res.status(500).json({ success: false, error: err.toString() });
+    }
+};
+
+// Get agent campaigns with pagination (from database)
+export const getAgentCampaignsPagination = async (req, res) => {
+    try {
+        const { agent_user } = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const perPage = parseInt(req.query.perPage) || 8;
+
+        if (!agent_user) {
+            return res.status(400).json({ success: false, error: 'agent_user required' });
+        }
+
+        const result = await getAgentCampaignsPaginated(agent_user, { page, perPage });
+
+        if (!result) {
+            return res.status(404).json({ success: false, error: 'Agent not found' });
+        }
+
+        return res.json({ success: true, data: result });
+    } catch (err) {
+        console.error('ERROR in getAgentCampaignsPagination:', err);
         return res.status(500).json({ success: false, error: err.toString() });
     }
 };

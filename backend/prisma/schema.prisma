@@ -1,0 +1,59 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id        Int      @id @default(autoincrement())
+  user      String   @unique @db.VarChar(50)
+  fullName  String?  @db.VarChar(200)
+  userGroup String?  @db.VarChar(50)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns AgentCampaign[]
+
+  @@map("agent")
+  @@index([user])
+}
+
+model Campaign {
+  id           Int      @id @default(autoincrement())
+  campaignId   String   @unique @db.VarChar(50)
+  campaignName String?  @db.VarChar(200)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  agents AgentCampaign[]
+
+  @@map("campaign")
+  @@index([campaignId])
+}
+
+model AgentCampaign {
+  id         Int      @id @default(autoincrement())
+  agentId    Int
+  campaignId Int
+  createdAt  DateTime @default(now())
+
+  agent    Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, campaignId])
+  @@map("agentcampaign")
+  @@index([agentId])
+  @@index([campaignId])
+}
+
+

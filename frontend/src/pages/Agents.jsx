@@ -12,52 +12,43 @@ export default function Agents(){
   const [totals, setTotals] = useState({agents:0, campaigns:0});
   const [view, setView] = useState('list'); // 'list' | 'campaigns' | 'stats'
   const [selectedAgent, setSelectedAgent] = useState(null);
+  const [page, setPage] = useState(1);
+  const [pageInput, setPageInput] = useState('1');
+  const perPage = 8;
 
-  const loadAgentsData = async () => {
+  const loadAgentsData = async (pageNum = 1) => {
     setLoading(true);
     try{
-      const end = new Date();
-      const start = new Date(end.getTime() - (90*24*60*60*1000));
-      const fmt = d => {
-        const YYYY = d.getFullYear();
-        const MM = String(d.getMonth() + 1).padStart(2, '0');
-        const DD = String(d.getDate()).padStart(2, '0');
-        const hh = String(d.getHours()).padStart(2, '0');
-        const mm = String(d.getMinutes()).padStart(2, '0');
-        const ss = String(d.getSeconds()).padStart(2, '0');
-        return `${YYYY}-${MM}-${DD} ${hh}:${mm}:${ss}`;
-      };
+      // fetch paginated agents from backend (db)
+      const r = await api.get(`/agents/stats/paginated?page=${pageNum}&perPage=${perPage}`);
+      const payload = r?.data?.data || {};
+      const list = Array.isArray(payload.data) ? payload.data : [];
 
-      // Use cached GET to avoid repeated network fetches
-      const statsRes = await getWithCache(`/agents/stats?start=${encodeURIComponent(fmt(start))}&end=${encodeURIComponent(fmt(end))}`, { ttl: 30_000 });
-      const list = Array.isArray(statsRes.data.data) ? statsRes.data.data : (statsRes.data.data? [statsRes.data.data]: []);
+      // map agents for UI
+      const mapped = list.map(a => ({
+        user: a.user,
+        name: a.fullName || a.full_name || a.user || '',
+        campaigns: Array.isArray(a.campaigns) ? a.campaigns.length : 0
+      }));
 
-      // Build agent list without doing per-agent extra requests (avoids N+1 problem)
-      const withStats = list.map(a => {
-        const user = a.user || a.agent_user || a.user_id || a.user;
-        return { user, name: a.full_name || a.fullname || a.name || a.user || a.agent_name || '', stats: a };
-      });
+      setAgents(mapped);
+      // set totals from pagination
+      const pagination = payload.pagination || { total: mapped.length };
+      setTotals(t => ({ ...t, agents: pagination.total }));
+      setPage(payload.pagination?.page || pageNum);
+      setPageInput(String(payload.pagination?.page || pageNum));
 
-      // set basic list and mark campaigns unknown until counts load
-      setTotals({ agents: withStats.length, campaigns: null });
-      // store agents without campaign counts yet
-      setAgents(withStats.map(s => ({ ...s, campaigns: undefined })));
-
-      // fetch campaign counts in a single call to avoid N+1 remote requests
+      // fetch total campaigns sum separately (existing endpoint)
       try {
         const countsRes = await getWithCache(`/agents/campaigns/counts`, { ttl: 30_000 });
         const countsMap = countsRes?.data?.data || {};
-        const withCounts = withStats.map(s => ({ ...s, campaigns: Number(countsMap[String(s.user)] || 0) }));
         const totalCampaigns = Object.values(countsMap).reduce((sum, v) => sum + Number(v || 0), 0);
-        setAgents(withCounts);
         setTotals(t => ({ ...t, campaigns: totalCampaigns }));
       } catch (err) {
         console.warn('counts fetch failed', err);
-        // fallback to zero if counts endpoint unavailable
-        const withCounts = withStats.map(s => ({ ...s, campaigns: 0 }));
-        setAgents(withCounts);
         setTotals(t => ({ ...t, campaigns: 0 }));
       }
+
     }catch(err){
       console.error(err);
     }finally{ setLoading(false); }
@@ -69,7 +60,7 @@ export default function Agents(){
       const res = await api.get('/agents/campaigns/sync-all');
       console.log('Sync result:', res.data);
       // Reload data after sync
-      await loadAgentsData();
+      await loadAgentsData(page);
       alert(`✅ Synced campaigns for ${res.data.data.agents_processed} agents! Total: ${res.data.data.total_campaigns} campaigns`);
     } catch (err) {
       console.error('Sync failed:', err);
@@ -80,13 +71,31 @@ export default function Agents(){
   };
 
   useEffect(()=>{
-    loadAgentsData();
+    loadAgentsData(1);
   },[]);
   
 
   const handleRowClick = (agent) => {
     setSelectedAgent(agent);
     setView('campaigns');
+  };
+
+  const handlePageChange = (newPage) => {
+    if (newPage >= 1) {
+      loadAgentsData(newPage);
+    }
+  };
+
+  const handlePageInputChange = (e) => setPageInput(e.target.value);
+
+  const handlePageInputSubmit = (e) => {
+    e.preventDefault();
+    const pageNum = parseInt(pageInput);
+    if (!isNaN(pageNum) && pageNum >= 1) {
+      loadAgentsData(pageNum);
+    } else {
+      setPageInput(String(page));
+    }
   };
 
   const handleShowStats = () => setView('stats');
@@ -136,9 +145,9 @@ export default function Agents(){
                 <tbody className="divide-y divide-gray-200">
                   {agents.map((a, idx) => (
                     <tr key={a.user || idx} className="cursor-pointer hover:bg-blue-50 transition-colors" onClick={() => handleRowClick(a)}>
-                      <td className="py-4 px-6 text-gray-500">{idx+1}</td>
+                      <td className="py-4 px-6 text-gray-500">{(page - 1) * perPage + idx+1}</td>
                       <td className="py-4 px-6 font-mono text-sm text-blue-600 font-medium">{a.user}</td>
-                      <td className="py-4 px-6 text-gray-900 font-medium">{a.name || (a.stats && a.stats.full_name) || '—'}</td>
+                      <td className="py-4 px-6 text-gray-900 font-medium">{a.name || '—'}</td>
                       <td className="py-4 px-6">
                         <span className="inline-flex items-center justify-center px-3 py-1 rounded-full bg-green-100 text-green-700 font-semibold text-sm">
                           {typeof a.campaigns === 'number' ? a.campaigns : '—'}
@@ -148,6 +157,19 @@ export default function Agents(){
                   ))}
                 </tbody>
               </table>
+              {/* Agents pagination controls */}
+              <div className="flex items-center justify-between px-6 py-4 bg-gray-50 border-t border-gray-200">
+                <div className="text-sm text-gray-600">Total agents: {totals.agents}</div>
+                <div className="flex items-center gap-4">
+                  <button onClick={() => handlePageChange(page-1)} disabled={page===1} className="px-3 py-2 bg-white border rounded">Previous</button>
+                  <form onSubmit={handlePageInputSubmit} className="flex items-center gap-2">
+                    <span className="text-sm">Page</span>
+                    <input type="number" value={pageInput} onChange={handlePageInputChange} className="w-16 px-2 py-1 border rounded text-center" />
+                    <span className="text-sm">of {Math.ceil(totals.agents / perPage) || 1}</span>
+                  </form>
+                  <button onClick={() => handlePageChange(page+1)} disabled={page >= Math.ceil(totals.agents / perPage)} className="px-3 py-2 bg-white border rounded">Next</button>
+                </div>
+              </div>
             </div>
           )}
         </div>
