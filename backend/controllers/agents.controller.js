@@ -424,6 +424,11 @@ export const syncAllAgentsCampaigns = async (req, res) => {
     try {
         const { start, end, user, pass } = req.query;
 
+        // Send initial response to prevent timeout
+        res.setTimeout(0); // Disable timeout for this long-running operation
+
+        console.log('🔄 Starting sync all agents campaigns...');
+
         // Get all agents first
         const now = new Date();
         const past = new Date(now.getTime() - (90 * 24 * 60 * 60 * 1000));
@@ -448,11 +453,106 @@ export const syncAllAgentsCampaigns = async (req, res) => {
             datetime_end: end || fmt(now),
         };
 
-        const raw = await callVicidial(payload);
-        const agentsList = parsePipeData(raw);
-        const agents = Array.isArray(agentsList) ? agentsList : [agentsList];
+        let raw, agentsList, agents;
+        try {
+            console.log('📞 Calling VICIdial agent_stats_export...');
+            raw = await callVicidial(payload);
+            agentsList = parsePipeData(raw);
+            agents = Array.isArray(agentsList) ? agentsList : [agentsList];
+            console.log(`✅ Received ${agents.length} agents from VICIdial`);
+        } catch (viciErr) {
+            console.error('❌ Failed to fetch agents from VICIdial:', viciErr.message);
+            return res.status(500).json({ 
+                success: false, 
+                error: `VICIdial API error: ${viciErr.message}` 
+            });
+        }
 
         console.log(`Syncing campaigns for ${agents.length} agents...`);
+
+        // Load local campaign map once for all agents (support multiple possible key names)
+        const campaignMap = {};
+        const triedPaths = [
+            path.join(process.cwd(), 'vicidial', 'campaigns.json'), 
+            path.join(__dirname, '..', 'vicidial', 'campaigns.json'),
+            path.join(__dirname, 'vicidial', 'campaigns.json')
+        ];
+        
+        let campaignMapLoaded = false;
+        for (const mapPath of triedPaths) {
+            try {
+                if (!fs.existsSync(mapPath)) continue;
+                const mRaw = fs.readFileSync(mapPath, 'utf8');
+                const mJson = JSON.parse(mRaw);
+                if (Array.isArray(mJson)) {
+                    mJson.forEach(item => {
+                        if (!item) return;
+                        if (item.campaign_id && item.campaign_name) {
+                            campaignMap[String(item.campaign_id).trim()] = String(item.campaign_name).trim();
+                        } else if (item['Outbound'] && item['Outbound Process']) {
+                            campaignMap[String(item['Outbound']).trim()] = String(item['Outbound Process']).trim();
+                        } else if (item['Campaign'] && item['Campaign Name']) {
+                            campaignMap[String(item['Campaign']).trim()] = String(item['Campaign Name']).trim();
+                        }
+                    });
+                } else if (typeof mJson === 'object') {
+                    // if file is an object map
+                    Object.keys(mJson).forEach(k => { campaignMap[k] = mJson[k]; });
+                }
+                console.log(`📋 Loaded ${Object.keys(campaignMap).length} campaign names from local map: ${mapPath}`);
+                campaignMapLoaded = true;
+                break;
+            } catch (e) {
+                console.warn(`⚠️ Could not load campaign map from ${mapPath}:`, e.message);
+            }
+        }
+
+        if (!campaignMapLoaded) {
+            console.log('⚠️ No local campaign map found - will fetch names from VICIdial API');
+        }
+
+        // Pre-populate campaignNameCache with local map entries (if not already cached)
+        Object.keys(campaignMap).forEach(id => {
+            if (!campaignNameCache.has(id)) {
+                campaignNameCache.set(id, campaignMap[id]);
+            }
+        });
+
+        // Fetch ALL campaign names from VICIdial in one call to populate cache
+        if (!campaignMapLoaded) {
+            try {
+                console.log('📞 Fetching all campaign names from VICIdial campaigns_list...');
+                const campRaw = await callVicidial({
+                    function: 'campaigns_list',
+                    source: 'node-api',
+                    stage: 'pipe',
+                    header: 'YES'
+                });
+                const parsed = parsePipeData(String(campRaw || ''));
+                let fetchedCount = 0;
+                if (Array.isArray(parsed)) {
+                    parsed.forEach(row => {
+                        const id = row.campaign_id || row.Outbound || row.CAMPAIGN_ID || row.campaign || row.Campaign;
+                        const name = row.campaign_name || row['Campaign Name'] || row['Outbound Process'] || row.CALLER_NAME;
+                        if (id && name && !campaignNameCache.has(String(id).trim())) {
+                            campaignNameCache.set(String(id).trim(), String(name).trim());
+                            fetchedCount++;
+                        }
+                    });
+                    console.log(`✅ Fetched ${fetchedCount} campaign names from VICIdial`);
+                } else if (parsed && typeof parsed === 'object') {
+                    const id = parsed.campaign_id || parsed.Outbound;
+                    const name = parsed.campaign_name || parsed['Outbound Process'] || parsed['Campaign Name'];
+                    if (id && name) {
+                        campaignNameCache.set(String(id).trim(), String(name).trim());
+                        console.log(`✅ Fetched 1 campaign name from VICIdial`);
+                    }
+                }
+            } catch (bulkErr) {
+                console.warn('⚠️ Could not fetch bulk campaign names from VICIdial:', bulkErr.message);
+                console.log('   Will use campaign IDs as fallback names');
+            }
+        }
 
         // Fetch campaigns for each agent with concurrency limit
         const results = {};
@@ -497,12 +597,14 @@ export const syncAllAgentsCampaigns = async (req, res) => {
 
                 codes = Array.from(new Set(codes)).map(s => s.replace(/[\s\|,]/g, "")).filter(Boolean);
 
-                // Load campaign names from cache or local map
+                // Build campaigns array using cached names (already pre-populated from local map or previous fetches)
+                // Skip individual remote fetches during bulk sync to avoid overwhelming the API
                 const campaigns = codes.map(id => ({ id, name: campaignNameCache.get(id) || id }));
 
                 const formatted = {
                     agent_user,
-                    agent_name: agent.full_name || agent.fullname || agent.name || null,
+                    agent_name: agent.full_name || agent.fullname || agent.name || agent.full || null,
+                    user_group: agent.user_group || agent.userGroup || null,
                     campaigns,
                     count_campaigns: campaigns.length,
                 };
@@ -607,11 +709,55 @@ export const getAgentsPaginated = async (req, res) => {
         const perPage = parseInt(req.query.perPage) || 8;
         const search = req.query.search || '';
 
-        const result = await getAgentsWithCampaigns({ page, perPage, search });
+        // Fetch active agents from VICIdial
+        let activeAgents = [];
+        try {
+            const payload = {
+                function: "logged_in_agents",
+                source: "node-api",
+                stage: "pipe",
+                header: "YES"
+            };
+            const raw = await callVicidial(payload);
+            const formatted = parsePipeData(raw);
+            activeAgents = Array.isArray(formatted) 
+                ? formatted.map(a => String(a.user || a.agent_user || a.agent || '').trim()).filter(Boolean)
+                : (formatted?.user ? [String(formatted.user).trim()] : []);
+        } catch (err) {
+            console.warn('Failed to fetch active agents:', err.message);
+        }
+
+        const result = await getAgentsWithCampaigns({ page, perPage, search, activeAgents });
 
         return res.json({ success: true, data: result });
     } catch (err) {
         console.error('ERROR in getAgentsPaginated:', err);
+        return res.status(500).json({ success: false, error: err.toString() });
+    }
+};
+
+// Get logged-in agents (active agents)
+export const getLoggedInAgents = async (req, res) => {
+    try {
+        const payload = {
+            function: "logged_in_agents",
+            source: "node-api",
+            stage: "pipe",
+            header: "YES"
+        };
+
+        const raw = await callVicidial(payload);
+        const formatted = parsePipeData(raw);
+
+        // Return list of active agent users
+        const activeAgents = Array.isArray(formatted) 
+            ? formatted.map(a => String(a.user || a.agent_user || a.agent || '').trim()).filter(Boolean)
+            : (formatted?.user ? [String(formatted.user).trim()] : []);
+
+        return res.json({ success: true, data: { active_agents: activeAgents, count: activeAgents.length } });
+
+    } catch (err) {
+        console.error('ERROR in getLoggedInAgents:', err);
         return res.status(500).json({ success: false, error: err.toString() });
     }
 };

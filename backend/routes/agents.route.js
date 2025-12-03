@@ -1,9 +1,10 @@
 import express from "express";
-import { getAgentCampaigns, getSingleAgentStats, getAllAgentStats, getCampaignsDetailsBatch, getAgentsCampaignCounts, syncAllAgentsCampaigns, getAgentCampaignsPagination, getAgentsPaginated } from "../controllers/agents.controller.js";
+import { getAgentCampaigns, getSingleAgentStats, getAllAgentStats, getCampaignsDetailsBatch, getAgentsCampaignCounts, syncAllAgentsCampaigns, getAgentCampaignsPagination, getAgentsPaginated, getLoggedInAgents } from "../controllers/agents.controller.js";
 
 const router = express.Router();
 
 // More specific routes MUST come before general ones
+router.get("/stats/logged-in", getLoggedInAgents);
 router.get("/stats/paginated", getAgentsPaginated);
 router.get("/stats/single", getSingleAgentStats);
 router.get("/stats", getAllAgentStats);

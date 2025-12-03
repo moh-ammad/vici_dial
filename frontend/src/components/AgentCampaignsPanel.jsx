@@ -2,18 +2,26 @@ import React, { useEffect, useState, useCallback } from 'react';
 import LoadingSkeleton from './LoadingSkeleton';
 import api from '../api';
 import BackButton from './BackButton';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 
-export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onShowStats }){
+export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onShowStats }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState('1');
   const perPage = 8;
+  const [tempStartDate, setTempStartDate] = useState('');
+  const [tempEndDate, setTempEndDate] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
 
   const loadData = useCallback(async (pageNum) => {
     setLoading(true);
     try {
-      const r = await api.get(`/agents/campaigns/paginated?agent_user=${encodeURIComponent(agentUser)}&page=${pageNum}&perPage=${perPage}`);
+      let url = `/agents/campaigns/paginated?agent_user=${encodeURIComponent(agentUser)}&page=${pageNum}&perPage=${perPage}`;
+      if (startDate) url += `&start=${encodeURIComponent(startDate)}`;
+      if (endDate) url += `&end=${encodeURIComponent(endDate)}`;
+      const r = await api.get(url);
       setData(r?.data?.data || {});
       setPage(pageNum);
       setPageInput(String(pageNum));
@@ -22,7 +30,7 @@ export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onSh
     } finally {
       setLoading(false);
     }
-  }, [agentUser]);
+  }, [agentUser, startDate, endDate]);
 
   useEffect(() => {
     loadData(1);
@@ -48,6 +56,20 @@ export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onSh
     }
   };
 
+  const handleDateApply = () => {
+    setStartDate(tempStartDate);
+    setEndDate(tempEndDate);
+    loadData(1);
+  };
+
+  const handleDateClear = () => {
+    setTempStartDate('');
+    setTempEndDate('');
+    setStartDate('');
+    setEndDate('');
+    loadData(1);
+  };
+
   if (loading) return <LoadingSkeleton rows={6} />;
 
   const campaigns = data?.campaigns || [];
@@ -63,6 +85,44 @@ export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onSh
         <div className="flex items-center justify-between">
           <p className="text-gray-600">View campaigns assigned to this agent</p>
           <button onClick={() => onShowStats && onShowStats()} className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors shadow-sm">See stats</button>
+        </div>
+      </div>
+
+      {/* Date Range Filter */}
+      <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+        <div className="flex items-end gap-4">
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1">From Date</label>
+            <input
+              type="date"
+              value={tempStartDate}
+              onChange={(e) => setTempStartDate(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              placeholder="dd-mm-yyyy"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1">To Date</label>
+            <input
+              type="date"
+              value={tempEndDate}
+              onChange={(e) => setTempEndDate(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              placeholder="dd-mm-yyyy"
+            />
+          </div>
+          <button
+            onClick={handleDateApply}
+            className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors"
+          >
+            Apply
+          </button>
+          <button
+            onClick={handleDateClear}
+            className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 font-medium transition-colors"
+          >
+            Clear
+          </button>
         </div>
       </div>
 
@@ -104,22 +164,27 @@ export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onSh
           </table>
 
           {/* Pagination Controls */}
-          <div className="flex items-center justify-between px-6 py-4 bg-gray-50 border-t border-gray-200">
+          <div className="flex flex-col md:flex-row items-center justify-between px-6 py-4 bg-gray-50 border-t border-gray-200 gap-3 md:gap-0">
+
+            {/* Info text */}
             <div className="text-sm text-gray-600">
               Showing {((pagination.page - 1) * perPage) + 1} to {Math.min(pagination.page * perPage, pagination.total)} of {pagination.total} campaigns
             </div>
 
-            <div className="flex items-center gap-4">
+            {/* Pagination controls */}
+            <div className="flex items-center gap-3">
               {/* Previous Button */}
               <button
                 onClick={() => handlePageChange(page - 1)}
                 disabled={page === 1}
-                className="px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium text-sm"
+                className="flex items-center gap-1 px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-full shadow-sm 
+                     hover:bg-linear-to-r hover:from-blue-400 hover:to-blue-500 hover:text-white 
+                     disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium text-sm"
               >
-                Previous
+                <ChevronLeft size={18} /> Previous
               </button>
 
-              {/* Page Number Input */}
+              {/* Page input */}
               <form onSubmit={handlePageInputSubmit} className="flex items-center gap-2">
                 <span className="text-sm text-gray-600 font-medium">Page</span>
                 <input
@@ -129,7 +194,7 @@ export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onSh
                   value={pageInput}
                   onChange={handlePageInputChange}
                   onBlur={handlePageInputSubmit}
-                  className="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
+                  className="w-16 px-3 py-1 border border-gray-300 rounded-md text-center focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-sm shadow-sm"
                 />
                 <span className="text-sm text-gray-600 font-medium">of {pagination.totalPages}</span>
               </form>
@@ -138,9 +203,11 @@ export default function AgentCampaignsPanel({ agentUser, agentName, onBack, onSh
               <button
                 onClick={() => handlePageChange(page + 1)}
                 disabled={page === pagination.totalPages}
-                className="px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium text-sm"
+                className="flex items-center gap-1 px-4 py-2 bg-white text-gray-700 border border-gray-300 rounded-full shadow-sm 
+                     hover:bg-linear-to-r hover:from-blue-400 hover:to-blue-500 hover:text-white 
+                     disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium text-sm"
               >
-                Next
+                Next <ChevronRight size={18} />
               </button>
             </div>
           </div>

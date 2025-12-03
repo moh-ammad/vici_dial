@@ -1,140 +1,182 @@
-import { PrismaClient } from '../generated/prisma/index.js';
-
+import { PrismaClient } from "../generated/prisma/index.js";
 const prisma = new PrismaClient();
 
 export default prisma;
 
-// Helper function to sync agents and campaigns to database
-// Uses transaction for atomicity and handles duplicates efficiently
 export async function syncAgentsCampaignsToDb(agentsData) {
+    const stats = {
+        agentsCreated: 0,
+        agentsUpdated: 0,
+        campaignsCreated: 0,
+        campaignsUpdated: 0,
+        relationsCreated: 0,
+        relationsRemoved: 0,
+        errors: []
+    };
+
     try {
-        const stats = {
-            agentsCreated: 0,
-            agentsUpdated: 0,
-            campaignsCreated: 0,
-            campaignsUpdated: 0,
-            relationsCreated: 0,
-            errors: []
-        };
+        for (const [agentUser, data] of Object.entries(agentsData)) {
+            try {
+                const agentUserStr = String(agentUser);
 
-        await prisma.$transaction(async (tx) => {
-            // Process all agents
-            for (const [agentUser, data] of Object.entries(agentsData)) {
-                try {
-                    // Upsert agent (create or update)
-                    const agent = await tx.agent.upsert({
-                        where: { user: String(agentUser) },
-                        update: {
-                            fullName: data.agent_name || null,
-                            userGroup: data.user_group || null,
-                            updatedAt: new Date()
-                        },
-                        create: {
-                            user: String(agentUser),
-                            fullName: data.agent_name || null,
-                            userGroup: data.user_group || null
-                        }
-                    });
+                // -------------------------
+                // 1. UPSERT AGENT
+                // -------------------------
+                const agentBefore = await prisma.agent.findUnique({
+                    where: { user: agentUserStr }
+                });
 
-                    const isNew = agent.createdAt.getTime() === agent.updatedAt.getTime();
-                    if (isNew) stats.agentsCreated++;
-                    else stats.agentsUpdated++;
+                const agent = await prisma.agent.upsert({
+                    where: { user: agentUserStr },
+                    update: {
+                        fullName: data.agent_name || null,
+                        userGroup: data.user_group || null
+                    },
+                    create: {
+                        user: agentUserStr,
+                        fullName: data.agent_name || null,
+                        userGroup: data.user_group || null
+                    }
+                });
 
-                    // Process campaigns for this agent
-                    if (Array.isArray(data.campaigns)) {
-                        for (const camp of data.campaigns) {
-                            if (!camp.id) continue;
+                if (!agentBefore) stats.agentsCreated++;
+                else stats.agentsUpdated++;
 
-                            // Upsert campaign
-                            const campaign = await tx.campaign.upsert({
-                                where: { campaignId: String(camp.id) },
-                                update: {
-                                    campaignName: camp.name || null,
-                                    updatedAt: new Date()
-                                },
-                                create: {
-                                    campaignId: String(camp.id),
-                                    campaignName: camp.name || null
-                                }
-                            });
+                // -------------------------
+                // 2. UPSERT CAMPAIGNS
+                // -------------------------
+                const newCampaignIds = [];
 
-                            const campIsNew = campaign.createdAt.getTime() === campaign.updatedAt.getTime();
-                            if (campIsNew) stats.campaignsCreated++;
+                if (Array.isArray(data.campaigns)) {
+                    for (const camp of data.campaigns) {
+                        if (!camp.id) continue;
 
-                            // Create agent-campaign relation if not exists
-                            const existing = await tx.agentCampaign.findFirst({
-                                where: {
-                                    agentId: agent.id,
-                                    campaignId: campaign.id
-                                }
-                            });
+                        const campId = String(camp.id);
+                        newCampaignIds.push(campId);
 
-                            if (!existing) {
-                                await tx.agentCampaign.create({
-                                    data: {
-                                        agentId: agent.id,
-                                        campaignId: campaign.id
-                                    }
-                                });
-                                stats.relationsCreated++;
+                        const existing = await prisma.campaign.findUnique({
+                            where: { campaignId: campId }
+                        });
+
+                        await prisma.campaign.upsert({
+                            where: { campaignId: campId },
+                            update: { campaignName: camp.name || existing?.campaignName || campId },
+                            create: {
+                                campaignId: campId,
+                                campaignName: camp.name || campId
                             }
+                        });
+
+                        if (!existing) stats.campaignsCreated++;
+                        else stats.campaignsUpdated++;
+                    }
+                }
+
+                // -------------------------
+                // 3. MANAGE RELATIONS CLEANLY
+                // -------------------------
+                const existingRelations = await prisma.agentCampaign.findMany({
+                    where: { agentId: agent.id },
+                    include: { campaign: true }
+                });
+
+                const existingIds = existingRelations.map(r => r.campaign.campaignId);
+
+                // ADD NEW RELATIONS
+                for (const newCid of newCampaignIds) {
+                    if (!existingIds.includes(newCid)) {
+                        const camp = await prisma.campaign.findUnique({
+                            where: { campaignId: newCid }
+                        });
+
+                        if (camp) {
+                            await prisma.agentCampaign.create({
+                                data: {
+                                    agentId: agent.id,
+                                    campaignId: camp.id
+                                }
+                            });
+                            stats.relationsCreated++;
                         }
                     }
-                } catch (err) {
-                    stats.errors.push({ agent: agentUser, error: err.message });
                 }
+
+                // REMOVE OLD RELATIONS  
+                for (const existingCid of existingIds) {
+                    if (!newCampaignIds.includes(existingCid)) {
+                        await prisma.agentCampaign.deleteMany({
+                            where: {
+                                agentId: agent.id,
+                                campaign: {
+                                    campaignId: existingCid
+                                }
+                            }
+                        });
+                        stats.relationsRemoved++;
+                    }
+                }
+
+            } catch (err) {
+                stats.errors.push({ agent: agentUser, error: err.message });
             }
-        });
+        }
 
         return { success: true, stats };
+
     } catch (err) {
-        console.error('Error syncing to database:', err);
+        console.error("❌ Error syncing to database:", err);
         return { success: false, error: err.message };
     }
 }
 
-// Get agents with campaigns (paginated)
-export async function getAgentsWithCampaigns({ page = 1, perPage = 10, search = '' }) {
+
+// -------------------------------
+// GET AGENTS WITH CAMPAIGNS
+// -------------------------------
+export async function getAgentsWithCampaigns({
+    page = 1,
+    perPage = 10,
+    search = "",
+    activeAgents = []
+}) {
     const skip = (page - 1) * perPage;
 
-    const where = search ? {
-        OR: [
-            { user: { contains: search } },
-            { fullName: { contains: search } }
-        ]
-    } : {};
+    const where = search
+        ? {
+              OR: [
+                  { user: { contains: search } },
+                  { fullName: { contains: search } }
+              ]
+          }
+        : {};
 
     const [agents, total] = await Promise.all([
         prisma.agent.findMany({
             where,
             include: {
                 campaigns: {
-                    include: {
-                        campaign: true
-                    }
+                    include: { campaign: true }
                 }
             },
             skip,
             take: perPage,
-            orderBy: { user: 'asc' }
+            orderBy: { user: "asc" }
         }),
         prisma.agent.count({ where })
     ]);
 
-    // Transform to frontend-friendly format
-    const transformed = agents.map(agent => ({
-        user: agent.user,
-        fullName: agent.fullName,
-        full_name: agent.fullName,
-        userGroup: agent.userGroup,
-        campaigns: agent.campaigns.map(ac => ({
-            id: ac.campaign.campaignId,
-            name: ac.campaign.campaignName || ac.campaign.campaignId
-        }))
-    }));
-
     return {
-        data: transformed,
+        data: agents.map(agent => ({
+            user: agent.user,
+            fullName: agent.fullName,
+            full_name: agent.fullName,
+            userGroup: agent.userGroup,
+            isActive: activeAgents.includes(agent.user),
+            campaigns: agent.campaigns.map(ac => ({
+                id: ac.campaign.campaignId,
+                name: ac.campaign.campaignName || ac.campaign.campaignId
+            }))
+        })),
         pagination: {
             page,
             perPage,
@@ -144,7 +186,10 @@ export async function getAgentsWithCampaigns({ page = 1, perPage = 10, search = 
     };
 }
 
-// Get campaigns for a specific agent (paginated)
+
+// -------------------------------
+// GET AGENT CAMPAIGNS PAGINATED
+// -------------------------------
 export async function getAgentCampaignsPaginated(agentUser, { page = 1, perPage = 8 }) {
     const skip = (page - 1) * perPage;
 
@@ -152,20 +197,12 @@ export async function getAgentCampaignsPaginated(agentUser, { page = 1, perPage 
         where: { user: String(agentUser) },
         include: {
             campaigns: {
-                include: {
-                    campaign: true
-                },
+                include: { campaign: true },
                 skip,
                 take: perPage,
-                orderBy: {
-                    campaign: {
-                        campaignName: 'asc'
-                    }
-                }
+                orderBy: { campaign: { campaignName: "asc" } }
             },
-            _count: {
-                select: { campaigns: true }
-            }
+            _count: { select: { campaigns: true } }
         }
     });
 

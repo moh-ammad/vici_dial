@@ -79,7 +79,7 @@ export default function AgentCampaigns() {
           <div className="text-3xl font-bold mt-2">{data.agent_user}</div>
         </div>
 
-        <div className="bg-linear-to-br from-purple-500 to-purple-600 rounded-lg p-6 text-white shadow-lg">
+        <div className="bg-linear-to-br from-slate-800 to-slate-700 rounded-lg p-6 text-white shadow-lg">
           <div className="text-sm font-medium opacity-90">Current Page</div>
           <div className="text-3xl font-bold mt-2">{pagination.page} / {pagination.totalPages}</div>
         </div>

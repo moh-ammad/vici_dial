@@ -1,6 +1,7 @@
+// backend/cron/sync.cron.js
 import cron from "node-cron";
 import { callVicidial } from "../services/vicidial.service.js";
-import { parsePipeData } from "../utils/formatter.js";
+import { parsePipeData } from "../utils/formatter.js";  // your universal parser
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -11,12 +12,34 @@ const VICI_DIR = path.join(__dirname, "..", "controllers", "vicidial");
 
 if (!fs.existsSync(VICI_DIR)) fs.mkdirSync(VICI_DIR, { recursive: true });
 
-// Sync all agents' campaigns every 30 minutes
-cron.schedule("*/30 * * * *", async () => {
-    console.log("🔄 Running auto-sync for all agents' campaigns...");
-    
+// Helper: given a campaign ID, fetch full campaign info and return name
+async function fetchCampaignName(cid) {
     try {
-        // Get all agents
+        const raw = await callVicidial({
+            function: "campaigns_list",
+            campaign_id: cid,
+            stage: "pipe",
+            header: "YES"
+        });
+        const parsed = parsePipeData(raw);
+        const row = Array.isArray(parsed) ? parsed[0] : parsed;
+        const name =
+            row.campaign_name ||
+            row["Campaign Name"] ||
+            row["Outbound Process"] ||
+            Object.values(row)[1] ||
+            cid;
+        return String(name).trim();
+    } catch (e) {
+        return cid;
+    }
+}
+
+async function syncAllAgents() {
+    console.log("🔄 Running full agents → campaigns sync...");
+
+    try {
+        // 1) fetch all agents
         const now = new Date();
         const past = new Date(now.getTime() - (90 * 24 * 60 * 60 * 1000));
         const fmt = d => {
@@ -29,7 +52,7 @@ cron.schedule("*/30 * * * *", async () => {
             return `${YYYY}-${MM}-${DD}+${hh}:${mm}:${ss}`;
         };
 
-        const payload = {
+        const rawAgents = await callVicidial({
             function: "agent_stats_export",
             source: "node-api",
             DB: "0",
@@ -38,21 +61,22 @@ cron.schedule("*/30 * * * *", async () => {
             time_format: "HF",
             datetime_start: fmt(past),
             datetime_end: fmt(now),
-        };
+        });
 
-        const raw = await callVicidial(payload);
-        const agentsList = parsePipeData(raw);
-        const agents = Array.isArray(agentsList) ? agentsList : [agentsList];
+        const parsedAgents = parsePipeData(rawAgents);
+        const agents = Array.isArray(parsedAgents) ? parsedAgents : [parsedAgents];
 
-        const results = {};
+        const allResults = {};
         let processed = 0;
 
+        // 2) for each agent get their campaigns
         for (const agent of agents) {
             const agent_user = agent.user || agent.agent_user || agent.user_id;
             if (!agent_user) continue;
 
             try {
-                const campRaw = await callVicidial("agent_campaigns", {
+                const campRaw = await callVicidial({
+                    function: "agent_campaigns",
                     source: "node-api",
                     agent_user,
                     ignore_agentdirect: "N",
@@ -61,8 +85,12 @@ cron.schedule("*/30 * * * *", async () => {
                 });
 
                 const rawTrim = String(campRaw || "").trim();
-                if (!rawTrim || rawTrim.toUpperCase().startsWith("ERROR:")) {
-                    results[agent_user] = { agent_user, campaigns: [], count_campaigns: 0 };
+                if (!rawTrim || rawTrim.toUpperCase().startsWith("ERROR")) {
+                    allResults[agent_user] = {
+                        agent_user,
+                        campaigns: [],
+                        count_campaigns: 0
+                    };
                     continue;
                 }
 
@@ -71,16 +99,22 @@ cron.schedule("*/30 * * * *", async () => {
 
                 let codes = [];
                 if (dataLine.includes("|")) {
-                    const parts = dataLine.split("|").map(p => p.trim());
-                    if (parts[1]) codes = parts[1].split("-").map(c => c.trim()).filter(Boolean);
-                } else if (dataLine.includes("-")) {
-                    codes = dataLine.split("-").map(c => c.trim()).filter(Boolean);
+                    const parts = dataLine.split("|").map(s => s.trim());
+                    if (parts[1]) {
+                        codes = parts[1].split("-").map(s => s.trim()).filter(Boolean);
+                    }
                 } else {
-                    codes = [dataLine.trim()].filter(Boolean);
+                    codes = dataLine.split("-").map(s => s.trim()).filter(Boolean);
                 }
 
-                codes = Array.from(new Set(codes)).map(s => s.replace(/[\s\|,]/g, "")).filter(Boolean);
-                const campaigns = codes.map(id => ({ id, name: id }));
+                codes = Array.from(new Set(codes));
+
+                // 3) For each campaign id — fetch real name
+                const campaigns = [];
+                for (const cid of codes) {
+                    const name = await fetchCampaignName(cid);
+                    campaigns.push({ id: cid, name });
+                }
 
                 const formatted = {
                     agent_user,
@@ -94,26 +128,36 @@ cron.schedule("*/30 * * * *", async () => {
                 const filePathAgent = path.join(VICI_DIR, `agent_campaigns_${safeAgent}.json`);
                 fs.writeFileSync(filePathAgent, JSON.stringify(formatted, null, 2));
 
-                results[agent_user] = formatted;
+                allResults[agent_user] = formatted;
                 processed++;
 
+                // small delay to avoid overwhelming API
                 if (processed % 5 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise(r => setTimeout(r, 150));
                 }
-            } catch (err) {
-                console.error(`Error syncing agent ${agent_user}:`, err.message);
+
+            } catch (agentErr) {
+                console.error(`⚠️ Error syncing agent ${agent.user}:`, agentErr.message);
             }
         }
 
+        // 4) write consolidated file
         const consolidatedPath = path.join(VICI_DIR, 'all_agents_campaigns.json');
-        fs.writeFileSync(consolidatedPath, JSON.stringify(results, null, 2));
+        fs.writeFileSync(consolidatedPath, JSON.stringify(allResults, null, 2));
 
-        const totalCampaigns = Object.values(results).reduce((sum, r) => sum + (r.count_campaigns || 0), 0);
-        console.log(`✅ Synced campaigns for ${processed}/${agents.length} agents. Total: ${totalCampaigns} campaigns`);
-
+        console.log(`✅ Synced ${processed}/${agents.length} agents. Total campaigns across all: ${Object.values(allResults).reduce((sum, r) => sum + (r.count_campaigns||0), 0)}`);
     } catch (err) {
-        console.error("❌ Error in campaign sync cron:", err);
+        console.error("❌ Error in syncAllAgents:", err);
     }
-});
+}
 
-console.log("✅ Cron job scheduled: Sync all agents' campaigns every 30 minutes");
+cron.schedule(
+    "0 0,15 * * *",
+    async () => {
+        console.log("⏰ Cron triggered: 12:00 AM or 3:00 PM (LA Time)");
+        await syncAllAgents();
+    },
+    { timezone: "America/Los_Angeles" }
+);
+
+console.log("✅ Cron scheduled: everyday at 12 AM & 3 PM (LA timezone)");
